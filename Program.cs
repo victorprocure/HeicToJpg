@@ -2,44 +2,39 @@
 using System.IO;
 using System.Threading.Tasks;
 using ImageMagick;
-
+using CommandLine;
 namespace HeicToJpg
 {
     class Program
     {
         static async Task Main(string[] args)
         {
-            var files = Directory.GetFiles("./input/");
+            var commandLineParser = new Parser(with =>
+            {
+                with.EnableDashDash = true;
+                with.CaseInsensitiveEnumValues = true;
+                with.HelpWriter = Console.Out;
+                with.AutoHelp = true;
+            });
+            var result = commandLineParser.ParseArguments<HeicConvertOptions>(args);
 
-            await Parallel.ForEachAsync(files, async (fileName, _) => await ConvertFile(fileName));
-        }
+            await result.MapResult(async options =>
+            {
+                var conversionService = new HeicConversionService(options);
+                try
+                {
+                    await conversionService.RunConversionAsync();
+                    return 0;
+                }
+                catch(Exception ex)
+                {
+                    if(!options.Quiet || options.Verbose){
+                        Console.WriteLine("An error occurred: {0}", ex.Message);
+                    }
 
-        private static async Task ConvertFile(string fileName)
-        {
-            string ext = Path.GetExtension(fileName).ToLowerInvariant();
-            if (ext == ".heic")
-            {
-                Console.WriteLine($"Found {Path.GetFileName(fileName)}. Converting to JPG...");
-                await ConvertHEIC(MagickFormat.Jpg, fileName, "./output");
-            }
-            else
-            {
-                Console.WriteLine($"{Path.GetFileName(fileName)} is not .HEIC... Skipping");
-            }
-        }
-
-        private static async Task ConvertHEIC(MagickFormat convertToFormat, string fileName, string outputPath)
-        {
-            try
-            {
-                using var image = new MagickImage(fileName);
-                image.Format = convertToFormat;
-                await image.WriteAsync($"{outputPath}/{Path.GetFileNameWithoutExtension(fileName)}.jpg");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Could not write: {Path.GetFileName(fileName)}. Error: {ex.Message}");
-            }
+                    return 1;
+                }
+            }, e => Task.FromResult(1));
         }
     }
 }
