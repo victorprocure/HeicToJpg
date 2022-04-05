@@ -1,8 +1,6 @@
 using HeicToJpg.Logging;
 using ImageMagick;
 using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -14,14 +12,12 @@ namespace HeicToJpg.DataFlow
 {
     public class HeicConversionPipeline
     {
-        private readonly ConcurrentBag<string> existingDirectories = new();
         private readonly HeicConvertOptions options;
-        private TransformManyBlock<string, string> firstBlock;
-        private TransformBlock<string, FileToConvert> step1GetNewFileName;
+        private TransformManyBlock<string, (DirectoryInfo, FileInfo)> firstBlock;
+        private TransformBlock<(DirectoryInfo, FileInfo), FileToConvert> step1GetNewFileName;
         private TransformBlock<FileToConvert, FileToConvert> step2CheckOutputDir;
         private TransformBlock<FileToConvert, ConvertCompletion> step3ConvertFile;
-        private BatchBlock<ConvertCompletion> step4BatchBuffer;
-        private ActionBlock<ConvertCompletion[]> step5NotifyComplete;
+        private ActionBlock<ConvertCompletion> step4NotifyComplete;
 
         public HeicConversionPipeline(HeicConvertOptions options)
         {
@@ -32,16 +28,16 @@ namespace HeicToJpg.DataFlow
         {
             var pipeline = CreatePipeline(cancellationToken);
 
-            pipeline.Post(options.InputDir);
+            await pipeline.SendAsync(options.InputDir);
             firstBlock.Complete();
 
-            await Task.WhenAll(step1GetNewFileName.Completion, step2CheckOutputDir.Completion, step3ConvertFile.Completion, step4BatchBuffer.Completion, step5NotifyComplete.Completion);
+            await Task.WhenAll(step1GetNewFileName.Completion, step2CheckOutputDir.Completion, step3ConvertFile.Completion, step4NotifyComplete.Completion);
         }
 
         private ITargetBlock<string> CreatePipeline(CancellationToken cancellationToken = default)
         {
             var outputExtension = ImageFormatDefaultExtensionService.GetExtensionFor(options.ConvertToFormat);
-
+            var outputDirectoryInfo = new DirectoryInfo(options.OutputDir);
             var fileProcessingOptions = new ExecutionDataflowBlockOptions
             {
                 MaxDegreeOfParallelism = Environment.ProcessorCount,
@@ -50,7 +46,7 @@ namespace HeicToJpg.DataFlow
 
             var largeExecutionOptions = new ExecutionDataflowBlockOptions
             {
-                MaxDegreeOfParallelism = 1,
+                MaxDegreeOfParallelism = Environment.ProcessorCount,
                 CancellationToken = cancellationToken
             };
 
@@ -59,30 +55,35 @@ namespace HeicToJpg.DataFlow
                 CancellationToken = cancellationToken
             };
 
-            firstBlock = new TransformManyBlock<string, string>(inputFolder =>
+            firstBlock = new TransformManyBlock<string, (DirectoryInfo, FileInfo)>(inputFolder =>
             {
-                string[] files = options.Recursive
-                    ? Directory.GetFiles(options.InputDir, "*.heic", SearchOption.AllDirectories)
-                    : Directory.GetFiles(options.InputDir, "*.heic", SearchOption.TopDirectoryOnly);
-                if (options.Verbose)
+                var directory = new DirectoryInfo(inputFolder);
+                if (!directory.Exists)
                 {
-                    NonBlockConsoleLogger.WriteLine("Retrieved {0} HEIC files from '{1}'{2}", files.Length, options.InputDir, options.Recursive ? " recursively" : string.Empty);
+                    NonBlockConsoleLogger.WriteLine("{0} folder does not exist", inputFolder);
+                    return Enumerable.Empty<(DirectoryInfo, FileInfo)>();
                 }
 
-                return files;
+                var filesInfo = directory.GetFiles("*.heic", new EnumerationOptions { RecurseSubdirectories = options.Recursive });
+
+                if (options.Verbose)
+                {
+                    NonBlockConsoleLogger.WriteLine("Retrieved {0} HEIC files from '{1}'{2}", filesInfo.Length, options.InputDir, options.Recursive ? " recursively" : string.Empty);
+                }
+
+                return filesInfo.Select(fi => (directory, fi));
             }, largeExecutionOptions);
 
-            step1GetNewFileName = new TransformBlock<string, FileToConvert>(filename =>
+            step1GetNewFileName = new TransformBlock<(DirectoryInfo, FileInfo), FileToConvert>(inputFileInfo =>
             {
-                var newFileName = $"{Path.GetFileNameWithoutExtension(filename)}.{outputExtension}";
-                var newFullPath = Path.Combine(options.OutputDir, GetPathRelativeToParent(options.InputDir, filename));
+                var convertedFileInfo = GetConvertFileInfo(inputFileInfo.Item2, inputFileInfo.Item1, outputDirectoryInfo, outputExtension);
 
-                return new FileToConvert(filename, newFullPath, newFileName);
+                return new FileToConvert(inputFileInfo.Item2, convertedFileInfo);
             }, largeExecutionOptions);
 
             step2CheckOutputDir = new TransformBlock<FileToConvert, FileToConvert>(fileRecord =>
             {
-                CreateDirectoryIfRequiredAsync(fileRecord.ConvertedPath, !options.Quiet || options.Verbose);
+                CreateDirectoryIfRequiredAsync(fileRecord.ConvertedFile, !options.Quiet || options.Verbose);
 
                 return fileRecord;
             }, largeExecutionOptions);
@@ -91,21 +92,19 @@ namespace HeicToJpg.DataFlow
             {
                 try
                 {
-                    using var imageToConvert = new MagickImage(fileRecord.OriginalFilename);
+                    using var imageToConvert = new MagickImage(fileRecord.OriginalFile, MagickFormat.Heic);
                     imageToConvert.Format = options.ConvertToFormat;
-                    await imageToConvert.WriteAsync(Path.Combine(fileRecord.ConvertedPath, fileRecord.ConvertedFileName));
+                    await imageToConvert.WriteAsync(fileRecord.ConvertedFile);
 
-                    return new ConvertCompletion(fileRecord.OriginalFilename, fileRecord.ConvertedFileName);
+                    return new ConvertCompletion(fileRecord.OriginalFile, fileRecord.ConvertedFile);
                 }
                 catch (Exception ex)
                 {
-                    return new ConvertCompletion(fileRecord.OriginalFilename, fileRecord.ConvertedFileName, ex);
+                    return new ConvertCompletion(fileRecord.OriginalFile, fileRecord.ConvertedFile, ex);
                 }
             }, fileProcessingOptions);
 
-            step4BatchBuffer = new BatchBlock<ConvertCompletion>(10);
-
-            step5NotifyComplete = new ActionBlock<ConvertCompletion[]>(completions =>
+            step4NotifyComplete = new ActionBlock<ConvertCompletion>(completion =>
             {
                 if (options.Quiet && !options.Verbose)
                 {
@@ -113,10 +112,6 @@ namespace HeicToJpg.DataFlow
                 }
 
                 var sb = new StringBuilder();
-
-                for (var i = 0; i < completions.Length; i++)
-                {
-                    var completion = completions[i];
                     if (options.Verbose)
                     {
                         sb.Append('[');
@@ -126,18 +121,12 @@ namespace HeicToJpg.DataFlow
 
                     if (completion.Exception is null)
                     {
-                        sb.AppendFormat("{0} was converted to {1}.", completion.OriginalFilename, completion.ConvertedFileName);
+                        sb.AppendFormat("{0} was converted to {1}.", completion.OriginalFile.FullName, completion.ConvertedFile.FullName);
                     }
                     else
                     {
-                        sb.AppendFormat("{0} could not be converted. Error: {1}", completion.OriginalFilename, completion.Exception.Message);
+                        sb.AppendFormat("{0} could not be converted. Error: {1}", completion.OriginalFile.FullName, completion.Exception.Message);
                     }
-
-                    if (i != completions.Length - 1)
-                    {
-                        sb.AppendLine();
-                    }
-                }
 
                 NonBlockConsoleLogger.WriteLine(sb.ToString());
             }, largeExecutionOptions);
@@ -146,47 +135,38 @@ namespace HeicToJpg.DataFlow
             firstBlock.LinkTo(step1GetNewFileName, linkOptions);
             step1GetNewFileName.LinkTo(step2CheckOutputDir, linkOptions);
             step2CheckOutputDir.LinkTo(step3ConvertFile, linkOptions);
-            step3ConvertFile.LinkTo(step4BatchBuffer, linkOptions);
-            step4BatchBuffer.LinkTo(step5NotifyComplete, linkOptions);
+            step3ConvertFile.LinkTo(step4NotifyComplete, linkOptions);
 
             return firstBlock;
         }
 
-        private void CreateDirectoryIfRequiredAsync(string path, bool showMessage)
+        private void CreateDirectoryIfRequiredAsync(FileInfo fileInfo, bool showMessage)
         {
-            if (existingDirectories.Contains(path))
+            if (!fileInfo.Directory.Exists)
             {
-                return;
-            }
-
-            try
-            {
-                if (!Directory.Exists(path))
+                if (showMessage)
                 {
-                    if (showMessage)
-                    {
-                        NonBlockConsoleLogger.WriteLine("{0} does not exist, creating...", path);
-                    }
-
-                    Directory.CreateDirectory(path);
+                    NonBlockConsoleLogger.WriteLine("{0} does not exist, creating...", fileInfo.DirectoryName);
                 }
-                existingDirectories.Add(path);
 
-            }
-            catch
-            {
+                fileInfo.Directory.Create();
             }
         }
 
-        private static string GetPathRelativeToParent(string inputDir, string fileName)
+
+        private static FileInfo GetConvertFileInfo(FileInfo originalFile, DirectoryInfo inputDirectory, DirectoryInfo outputDirectory, string convertFileExtension)
         {
-            var newPath = Path.GetDirectoryName(fileName).Replace(inputDir, string.Empty);
-            newPath = newPath.TrimStart(Path.DirectorySeparatorChar).TrimStart(Path.AltDirectorySeparatorChar);
-            return newPath;
+            var newFileName = Path.ChangeExtension(originalFile.Name, convertFileExtension);
+            var originalDirectory = originalFile.DirectoryName;
+            var newDirectory = originalDirectory.Replace(inputDirectory.FullName, outputDirectory.FullName, true, null);
+
+            var convertedFileInfo = new FileInfo(Path.Combine(newDirectory, newFileName));
+
+            return convertedFileInfo;
         }
 
-        private record ConvertCompletion(string OriginalFilename, string ConvertedFileName, Exception Exception = default);
+        private record ConvertCompletion(FileInfo OriginalFile, FileInfo ConvertedFile, Exception Exception = default);
 
-        private record FileToConvert(string OriginalFilename, string ConvertedPath, string ConvertedFileName);
+        private record FileToConvert(FileInfo OriginalFile, FileInfo ConvertedFile);
     }
 }
