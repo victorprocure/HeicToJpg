@@ -1,30 +1,50 @@
 using System;
+using System.Collections.Concurrent;
 using System.Threading.Tasks;
 
 namespace HeicToJpg.Logging
 {
-    public class NonBlockConsoleLogger
+    public static class NonBlockConsoleLogger
     {
-        private readonly HeicConvertOptions options;
-
-        public NonBlockConsoleLogger(HeicConvertOptions options)
+        private static BlockingCollection<(string message, object[] values)> messageCollection = new();
+        static NonBlockConsoleLogger()
         {
-            this.options = options;
+            Task.Run(() =>
+            {
+                while (true)
+                {
+                    PrintMessage(messageCollection.Take());
+                }
+            });
         }
 
-        public async Task WriteLine(string value, bool verboseWrite = false, params object[] values)
+        public static void WriteLine(string message, params object[] values)
+            => messageCollection.Add((message, values));
+
+        public static void WriteLine(string message)
+            => messageCollection.Add((message, null));
+
+        public static void Flush()
         {
-            if (options.Quiet && !options.Verbose)
+            while (messageCollection.TryTake(out var values))
             {
-                return;
+                PrintMessage(messageCollection.Take());
             }
+        }
 
-            if (verboseWrite && !options.Verbose)
+        private static void PrintMessage((string message, object[] values) values)
+        {
+            if (!string.IsNullOrEmpty(values.message))
             {
-                return;
+                if (values.values is null)
+                {
+                    Console.WriteLine(values.message);
+                }
+                else
+                {
+                    Console.WriteLine(values.message, values.values);
+                }
             }
-
-            await Console.Out.WriteLineAsync(string.Format(value, values));
         }
     }
 }

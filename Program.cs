@@ -3,6 +3,8 @@ using System.IO;
 using System.Threading.Tasks;
 using ImageMagick;
 using CommandLine;
+using HeicToJpg.Logging;
+
 namespace HeicToJpg
 {
     class Program
@@ -24,6 +26,7 @@ namespace HeicToJpg
                 try
                 {
                     await conversionService.RunConversionAsync();
+                    NonBlockConsoleLogger.Flush();
                     return 0;
                 }
                 catch(Exception ex)
