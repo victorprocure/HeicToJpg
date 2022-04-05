@@ -25,6 +25,7 @@ namespace HeicToJpg.DataFlow
 
         public HeicConversionPipeline(HeicConvertOptions options)
         {
+            ResourceLimits.LimitMemory(new Percentage(90));
             this.options = options;
         }
         public async Task ExecuteAsync(CancellationToken cancellationToken = default)
