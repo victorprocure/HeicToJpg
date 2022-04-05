@@ -6,6 +6,8 @@
     <RuntimeIdentifiers>
       win10-x64;
     </RuntimeIdentifiers>
+    <Nullable>Enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>

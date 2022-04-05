@@ -13,11 +13,11 @@ namespace HeicToJpg.DataFlow
     public class HeicConversionPipeline
     {
         private readonly HeicConvertOptions options;
-        private TransformManyBlock<string, (DirectoryInfo, FileInfo)> firstBlock;
-        private TransformBlock<(DirectoryInfo, FileInfo), FileToConvert> step1GetNewFileName;
-        private TransformBlock<FileToConvert, FileToConvert> step2CheckOutputDir;
-        private TransformBlock<FileToConvert, ConvertCompletion> step3ConvertFile;
-        private ActionBlock<ConvertCompletion> step4NotifyComplete;
+        private TransformManyBlock<string, (DirectoryInfo, FileInfo)>? firstBlock;
+        private TransformBlock<(DirectoryInfo, FileInfo), FileToConvert>? step1GetNewFileName;
+        private TransformBlock<FileToConvert, FileToConvert>? step2CheckOutputDir;
+        private TransformBlock<FileToConvert, ConvertCompletion>? step3ConvertFile;
+        private ActionBlock<ConvertCompletion>? step4NotifyComplete;
 
         public HeicConversionPipeline(HeicConvertOptions options)
         {
@@ -29,9 +29,9 @@ namespace HeicToJpg.DataFlow
             var pipeline = CreatePipeline(cancellationToken);
 
             await pipeline.SendAsync(options.InputDir);
-            firstBlock.Complete();
+            pipeline.Complete();
 
-            await Task.WhenAll(step1GetNewFileName.Completion, step2CheckOutputDir.Completion, step3ConvertFile.Completion, step4NotifyComplete.Completion);
+            await Task.WhenAll(step1GetNewFileName?.Completion ?? Task.CompletedTask, step2CheckOutputDir?.Completion ?? Task.CompletedTask, step3ConvertFile?.Completion ?? Task.CompletedTask, step4NotifyComplete?.Completion ?? Task.CompletedTask);
         }
 
         private ITargetBlock<string> CreatePipeline(CancellationToken cancellationToken = default)
@@ -112,21 +112,21 @@ namespace HeicToJpg.DataFlow
                 }
 
                 var sb = new StringBuilder();
-                    if (options.Verbose)
-                    {
-                        sb.Append('[');
-                        sb.Append(DateTime.Now);
-                        sb.Append("]: ");
-                    }
+                if (options.Verbose)
+                {
+                    sb.Append('[');
+                    sb.Append(DateTime.Now);
+                    sb.Append("]: ");
+                }
 
-                    if (completion.Exception is null)
-                    {
-                        sb.AppendFormat("{0} was converted to {1}.", completion.OriginalFile.FullName, completion.ConvertedFile.FullName);
-                    }
-                    else
-                    {
-                        sb.AppendFormat("{0} could not be converted. Error: {1}", completion.OriginalFile.FullName, completion.Exception.Message);
-                    }
+                if (completion.Exception is null)
+                {
+                    sb.AppendFormat("{0} was converted to {1}.", completion.OriginalFile.FullName, completion.ConvertedFile.FullName);
+                }
+                else
+                {
+                    sb.AppendFormat("{0} could not be converted. Error: {1}", completion.OriginalFile.FullName, completion.Exception.Message);
+                }
 
                 NonBlockConsoleLogger.WriteLine(sb.ToString());
             }, largeExecutionOptions);
@@ -142,6 +142,11 @@ namespace HeicToJpg.DataFlow
 
         private void CreateDirectoryIfRequiredAsync(FileInfo fileInfo, bool showMessage)
         {
+            if (fileInfo.Directory is null)
+            {
+                throw new InvalidOperationException("File Info must have a directory set");
+            }
+
             if (!fileInfo.Directory.Exists)
             {
                 if (showMessage)
@@ -158,14 +163,17 @@ namespace HeicToJpg.DataFlow
         {
             var newFileName = Path.ChangeExtension(originalFile.Name, convertFileExtension);
             var originalDirectory = originalFile.DirectoryName;
-            var newDirectory = originalDirectory.Replace(inputDirectory.FullName, outputDirectory.FullName, true, null);
-
+            var newDirectory = originalDirectory?.Replace(inputDirectory.FullName, outputDirectory.FullName, true, null);
+            if (newDirectory is null)
+            {
+                throw new InvalidOperationException("Original file's directory cannot be null");
+            }
             var convertedFileInfo = new FileInfo(Path.Combine(newDirectory, newFileName));
 
             return convertedFileInfo;
         }
 
-        private record ConvertCompletion(FileInfo OriginalFile, FileInfo ConvertedFile, Exception Exception = default);
+        private record ConvertCompletion(FileInfo OriginalFile, FileInfo ConvertedFile, Exception? Exception = default);
 
         private record FileToConvert(FileInfo OriginalFile, FileInfo ConvertedFile);
     }

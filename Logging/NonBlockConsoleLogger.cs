@@ -6,7 +6,7 @@ namespace HeicToJpg.Logging
 {
     public static class NonBlockConsoleLogger
     {
-        private static BlockingCollection<(string message, object[] values)> messageCollection = new();
+        private static BlockingCollection<(string message, object?[] values)> messageCollection = new();
         static NonBlockConsoleLogger()
         {
             Task.Run(() =>
@@ -18,11 +18,11 @@ namespace HeicToJpg.Logging
             });
         }
 
-        public static void WriteLine(string message, params object[] values)
+        public static void WriteLine(string message, params object?[] values)
             => messageCollection.Add((message, values));
 
         public static void WriteLine(string message)
-            => messageCollection.Add((message, null));
+            => messageCollection.Add((message, Array.Empty<object>()));
 
         public static void Flush()
         {
@@ -32,7 +32,7 @@ namespace HeicToJpg.Logging
             }
         }
 
-        private static void PrintMessage((string message, object[] values) values)
+        private static void PrintMessage((string message, object?[] values) values)
         {
             if (!string.IsNullOrEmpty(values.message))
             {
